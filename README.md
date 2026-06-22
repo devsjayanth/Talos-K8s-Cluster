@@ -1,13 +1,12 @@
 # Talos-K8s-Cluster
-
-**1 Control Plane + 2 Workers | June 2026**
+### Complete Talos Kubernetes Cluster Guide
+**1 Control Plane + 2 Workers | Static IPs | June 2026**
 
 ---
 
 ## Prerequisites
 
-Install on your **local machine**:
-
+**1. Install CLI tools on your local machine:**
 ```bash
 # talosctl
 curl -sL https://github.com/siderolabs/talos/releases/download/v1.13.4/talosctl-$(uname -s | tr '[:upper:]' '[:lower:]')-amd64 -o /usr/local/bin/talosctl
@@ -18,88 +17,108 @@ curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.
 chmod +x kubectl && sudo mv kubectl /usr/local/bin/
 ```
 
-Prepare **3 machines** (VMs or bare metal) booted into the **Talos v1.13.4 ISO** (Maintenance Mode). Note their IPs:
-
-| Role | Variable |
-|---|---|
-| Control Plane | `<CP_IP>` |
-| Worker 1 | `<W1_IP>` |
-| Worker 2 | `<W2_IP>` |
+**2. Prepare 3 Machines:**
+Boot 3 VMs/bare-metal machines using the **Talos v1.13.4 ISO**. 
+Note their **initial DHCP IPs** (assigned by your router) and their **network interface names** (e.g., `eth0`, `ens192`):
+*   Control Plane: `<DHCP_CP>` -> Target Static: `192.168.1.10`
+*   Worker 1: `<DHCP_W1>` -> Target Static: `192.168.1.11`
+*   Worker 2: `<DHCP_W2>` -> Target Static: `192.168.1.12`
 
 ---
 
-## Phase 1: Bootstrap Talos Cluster
+## Phase 1: Bootstrap Talos Cluster (Static IPs)
 
-### Step 1 — Generate Configs
-
+### Step 1 — Generate Base Configs
+Generate configs using the **target static IP** of the control plane:
 ```bash
-talosctl gen config my-talos-cluster https://<CP_IP>:6443
+talosctl gen config my-talos-cluster https://192.168.1.10:6443
 ```
 
-This creates:
-- `controlplane.yaml`
-- `worker.yaml`
-- `talosconfig`
+### Step 2 — Create Static IP Patches
+*⚠️ Change `eth0` to your actual interface name. Update IPs, CIDR (`/24`), and Gateway to match your network.*
 
-### Step 2 — Apply Configs to Nodes
+```bash
+# Control Plane Patch
+cat <<EOF > patch-cp.yaml
+machine:
+  network:
+    interfaces:
+      - interface: eth0
+        addresses: ["192.168.1.10/24"]
+        routes: [{"network": "0.0.0.0/0", "gateway": "192.168.1.1"}]
+EOF
+
+# Worker 1 Patch
+cat <<EOF > patch-w1.yaml
+machine:
+  network:
+    interfaces:
+      - interface: eth0
+        addresses: ["192.168.1.11/24"]
+        routes: [{"network": "0.0.0.0/0", "gateway": "192.168.1.1"}]
+EOF
+
+# Worker 2 Patch
+cat <<EOF > patch-w2.yaml
+machine:
+  network:
+    interfaces:
+      - interface: eth0
+        addresses: ["192.168.1.12/24"]
+        routes: [{"network": "0.0.0.0/0", "gateway": "192.168.1.1"}]
+EOF
+```
+
+### Step 3 — Apply Patches to Configs
+```bash
+talosctl config patch controlplane.yaml --file patch-cp.yaml
+talosctl config patch worker.yaml --file patch-w1.yaml --output worker1.yaml
+talosctl config patch worker.yaml --file patch-w2.yaml --output worker2.yaml
+```
+
+### Step 4 — Apply Configs to Nodes
+*Note: We use the **initial DHCP IPs** here. The nodes will reboot and switch to the static IPs defined in the patches.*
 
 ```bash
 # Control Plane
-talosctl apply-config --insecure --nodes <CP_IP> --file controlplane.yaml
+talosctl apply-config --insecure --nodes <DHCP_CP> --file controlplane.yaml
 
 # Workers
-talosctl apply-config --insecure --nodes <W1_IP> --file worker.yaml
-talosctl apply-config --insecure --nodes <W2_IP> --file worker.yaml
+talosctl apply-config --insecure --nodes <DHCP_W1> --file worker1.yaml
+talosctl apply-config --insecure --nodes <DHCP_W2> --file worker2.yaml
 ```
 
-Nodes will reboot into Talos OS.
-
-### Step 3 — Configure Local talosctl
+### Step 5 — Configure Local `talosctl` & Bootstrap
+*Wait ~2-3 minutes for the nodes to reboot and acquire their new static IPs.*
 
 ```bash
+# Merge config and point to the NEW static IPs
 talosctl config merge ./talosconfig
-talosctl config endpoints <CP_IP>
-talosctl config nodes <CP_IP>
-```
+talosctl config endpoints 192.168.1.10
+talosctl config nodes 192.168.1.10
 
-### Step 4 — Bootstrap etcd
-
-```bash
+# Bootstrap etcd and get kubeconfig
 talosctl bootstrap
-```
-
-### Step 5 — Retrieve Kubeconfig
-
-```bash
 talosctl kubeconfig ~/.kube
 ```
 
 ### Step 6 — Verify Nodes
-
 ```bash
 kubectl get nodes
 ```
-
-Expected output: **3 nodes, all `Ready`**.
+*Expected: 3 nodes, all `Ready`.*
 
 ---
 
 ## Phase 2: Install MetalLB (L4 Load Balancer)
 
 ### Step 7 — Deploy MetalLB
-
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.16.1/config/manifests/metallb-native.yaml
-```
-
-Wait for pods to be ready:
-
-```bash
 kubectl wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=90s
 ```
 
 ### Step 8 — Create IP Pool
-
 > ⚠️ Change the `addresses` range to **unused IPs** in your local network.
 
 ```bash
@@ -129,43 +148,28 @@ EOF
 ## Phase 3: Install NGINX Ingress Controller (L7)
 
 ### Step 9 — Deploy Ingress-NGINX
-
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/baremetal/deploy.yaml
-```
-
-Wait for readiness:
-
-```bash
 kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=120s
 ```
 
-### Step 10 — Verify External IP Assigned
-
+### Step 10 — Verify External IP
 ```bash
 kubectl get svc -n ingress-nginx ingress-nginx-controller
 ```
-
-Expected: `EXTERNAL-IP` shows an IP from your MetalLB pool (e.g., `192.168.1.240`).
+*Expected: `EXTERNAL-IP` shows an IP from your MetalLB pool (e.g., `192.168.1.240`).*
 
 ---
 
-## Phase 4: Install Cert-Manager (Optional — Automated TLS)
+## Phase 4: Install Cert-Manager (Automated TLS)
 
 ### Step 11 — Deploy Cert-Manager
-
 ```bash
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml
-```
-
-Wait for readiness:
-
-```bash
 kubectl wait --namespace cert-manager --for=condition=ready pod --selector=app.kubernetes.io/instance=cert-manager --timeout=120s
 ```
 
 ### Step 12 — Create Let's Encrypt ClusterIssuer
-
 ```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: cert-manager.io/v1
@@ -190,7 +194,6 @@ EOF
 ## Phase 5: Test Everything
 
 ### Step 13 — Deploy a Sample App
-
 ```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -229,15 +232,15 @@ kind: Ingress
 metadata:
   name: hello-world
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod  # Remove if no cert-manager
+    cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
   ingressClassName: nginx
-  tls:                                                  # Remove if no cert-manager
-  - hosts:                                              # Remove if no cert-manager
-    - hello.example.com                                 # Remove if no cert-manager
-    secretName: hello-tls                               # Remove if no cert-manager
+  tls:
+  - hosts:
+    - hello.example.com
+    secretName: hello-tls
   rules:
-  - host: hello.example.com                             # Change to your domain or remove host for IP access
+  - host: hello.example.com
     http:
       paths:
       - path: /
@@ -251,44 +254,26 @@ EOF
 ```
 
 ### Step 14 — Final Verification
-
 ```bash
-# Check all pods across namespaces
 kubectl get pods -A
-
-# Check ingress got an address
 kubectl get ingress
-
-# Check MetalLB assigned IPs
 kubectl get svc -A | grep LoadBalancer
 ```
 
 ---
 
-## Summary of Components
-
-| Component | Version | Purpose |
-|---|---|---|
-| **Talos Linux** | v1.13.4 | Immutable Kubernetes OS |
-| **Flannel** | Built-in | Pod networking (CNI) |
-| **MetalLB** | v0.16.1 | L4 Load Balancer (assigns IPs) |
-| **Ingress-NGINX** | v1.15.1 | L7 HTTP/HTTPS routing |
-| **Cert-Manager** | v1.20.2 | Automated TLS certificates |
-
----
-
-## Useful Day-2 Commands
+## Day-2 Operations Cheat Sheet
 
 ```bash
-# Upgrade Talos on a node
-talosctl upgrade --nodes <NODE_IP> --image ghcr.io/siderolabs/installer:v1.13.4
+# Upgrade Talos OS on a specific node
+talosctl upgrade --nodes 192.168.1.10 --image ghcr.io/siderolabs/installer:v1.13.4
 
-# Upgrade Kubernetes
+# Upgrade Kubernetes control plane
 talosctl upgrade-k8s --to 1.33.1
 
-# View Talos service logs
-talosctl logs kubelet
+# View kubelet logs on a node
+talosctl --nodes 192.168.1.10 logs kubelet
 
-# Enter a node's shell
-talosctl --nodes <NODE_IP> shell
+# Reset a node to maintenance mode (wipes data)
+talosctl reset --nodes 192.168.1.11 --graceful=false
 ```
