@@ -46,68 +46,77 @@ talosctl gen config my-talos-cluster https://192.168.1.10:6443
 ### Step 2 — Create Static IP Patches
 *⚠️ Change `eth0` to your actual interface name. Update IPs, CIDR (`/24`), and Gateway to match your network.*
 
-### 1. Update your Patch Files
-Add the `nameservers` block to each patch file. *(You can use your router's IP, Google `8.8.8.8`, or Cloudflare `1.1.1.1`)*.
+### 1. Create the Patch Files
 
 **Control Plane (`patch-cp.yaml`):**
 ```bash
 cat <<EOF > patch-cp.yaml
 machine:
   network:
+    nameservers:
+      - 10.0.1.2
     interfaces:
-      - interface: eth0
-        addresses: ["192.168.1.10/24"]
-        routes: [{"network": "0.0.0.0/0", "gateway": "192.168.1.1"}]
-        nameservers:
-          - 8.8.8.8
-          - 1.1.1.1
+      - interface: ens160
+        addresses:
+          - 10.0.1.20/24
+        routes:
+          - network: 0.0.0.0/0
+            gateway: 10.0.1.2
 EOF
 ```
 
-**Worker 1 (`patch-w1.yaml`):**
+**Worker 1 (`patch-w1.yaml`):** *(Change `10.0.1.21` to your desired Worker 1 IP)*
 ```bash
 cat <<EOF > patch-w1.yaml
 machine:
   network:
+    nameservers:
+      - 10.0.1.2
     interfaces:
-      - interface: eth0
-        addresses: ["192.168.1.11/24"]
-        routes: [{"network": "0.0.0.0/0", "gateway": "192.168.1.1"}]
-        nameservers:
-          - 8.8.8.8
-          - 1.1.1.1
+      - interface: ens160
+        addresses:
+          - 10.0.1.21/24
+        routes:
+          - network: 0.0.0.0/0
+            gateway: 10.0.1.2
 EOF
 ```
 
-**Worker 2 (`patch-w2.yaml`):**
+**Worker 2 (`patch-w2.yaml`):** *(Change `10.0.1.22` to your desired Worker 2 IP)*
 ```bash
 cat <<EOF > patch-w2.yaml
 machine:
   network:
+    nameservers:
+      - 10.0.1.2
     interfaces:
-      - interface: eth0
-        addresses: ["192.168.1.12/24"]
-        routes: [{"network": "0.0.0.0/0", "gateway": "192.168.1.1"}]
-        nameservers:
-          - 8.8.8.8
-          - 1.1.1.1
+      - interface: ens160
+        addresses:
+          - 10.0.1.22/24
+        routes:
+          - network: 0.0.0.0/0
+            gateway: 10.0.1.2
 EOF
 ```
+
+### 2. Apply the Configs
+Now run the apply commands again:
+
+```bash
+# Control Plane
+talosctl apply-config --insecure --nodes <W1_DHCP_IP> --file controlplane.yaml --config-patch @patch-cp.yaml
+
+# Workers (Replace with their actual current DHCP IPs)
+talosctl apply-config --insecure --nodes <W1_DHCP_IP> --file worker.yaml --config-patch @patch-w1.yaml
+talosctl apply-config --insecure --nodes <W2_DHCP_IP> --file worker.yaml --config-patch @patch-w2.yaml
+```
+
+The nodes will now accept the configuration, reboot, and come up with their static IPs and DNS correctly configured!
 
 ### 2. Re-apply the Patches and Configs
 Now, re-run the patch and apply commands to push the DNS settings to the nodes:
 
 ```bash
-# Re-patch the base configs
-# Control Plane
-talosctl apply-config --insecure --nodes <CP_IP-Address> --file controlplane.yaml --config-patch @patch-cp.yaml
-
-# Worker 1
-talosctl apply-config --insecure --nodes <W1_IP-Address> --file worker.yaml --config-patch @patch-w1.yaml
-
-# Worker 2
-talosctl apply-config --insecure --nodes <W2_IP-Address> --file worker.yaml --config-patch @patch-w2.yaml
-
 # Re-apply to the nodes (using their DHCP IPs if they haven't rebooted yet, or static IPs if they have)
 talosctl apply-config --insecure --nodes <CP_IP-Address> --file controlplane.yaml
 talosctl apply-config --insecure --nodes <W1_IP-Address> --file worker1.yaml
