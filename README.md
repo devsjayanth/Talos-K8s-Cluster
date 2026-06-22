@@ -46,8 +46,11 @@ talosctl gen config my-talos-cluster https://192.168.1.10:6443
 ### Step 2 — Create Static IP Patches
 *⚠️ Change `eth0` to your actual interface name. Update IPs, CIDR (`/24`), and Gateway to match your network.*
 
+### 1. Update your Patch Files
+Add the `nameservers` block to each patch file. *(You can use your router's IP, Google `8.8.8.8`, or Cloudflare `1.1.1.1`)*.
+
+**Control Plane (`patch-cp.yaml`):**
 ```bash
-# Control Plane Patch
 cat <<EOF > patch-cp.yaml
 machine:
   network:
@@ -55,9 +58,14 @@ machine:
       - interface: eth0
         addresses: ["192.168.1.10/24"]
         routes: [{"network": "0.0.0.0/0", "gateway": "192.168.1.1"}]
+        nameservers:
+          - 8.8.8.8
+          - 1.1.1.1
 EOF
+```
 
-# Worker 1 Patch
+**Worker 1 (`patch-w1.yaml`):**
+```bash
 cat <<EOF > patch-w1.yaml
 machine:
   network:
@@ -65,9 +73,14 @@ machine:
       - interface: eth0
         addresses: ["192.168.1.11/24"]
         routes: [{"network": "0.0.0.0/0", "gateway": "192.168.1.1"}]
+        nameservers:
+          - 8.8.8.8
+          - 1.1.1.1
 EOF
+```
 
-# Worker 2 Patch
+**Worker 2 (`patch-w2.yaml`):**
+```bash
 cat <<EOF > patch-w2.yaml
 machine:
   network:
@@ -75,29 +88,30 @@ machine:
       - interface: eth0
         addresses: ["192.168.1.12/24"]
         routes: [{"network": "0.0.0.0/0", "gateway": "192.168.1.1"}]
+        nameservers:
+          - 8.8.8.8
+          - 1.1.1.1
 EOF
 ```
 
-### Step 3 — Apply Patches to Configs
+### 2. Re-apply the Patches and Configs
+Now, re-run the patch and apply commands to push the DNS settings to the nodes:
+
 ```bash
+# Re-patch the base configs
 talosctl config patch controlplane.yaml --file patch-cp.yaml
 talosctl config patch worker.yaml --file patch-w1.yaml --output worker1.yaml
 talosctl config patch worker.yaml --file patch-w2.yaml --output worker2.yaml
-```
 
-### Step 4 — Apply Configs to Nodes
-*Note: We use the **initial DHCP IPs** here. The nodes will reboot and switch to the static IPs defined in the patches.*
-
-```bash
-# Control Plane
+# Re-apply to the nodes (using their DHCP IPs if they haven't rebooted yet, or static IPs if they have)
 talosctl apply-config --insecure --nodes <DHCP_CP> --file controlplane.yaml
-
-# Workers
 talosctl apply-config --insecure --nodes <DHCP_W1> --file worker1.yaml
 talosctl apply-config --insecure --nodes <DHCP_W2> --file worker2.yaml
 ```
 
-### Step 5 — Configure Local `talosctl` & Bootstrap
+*Note: If your nodes already rebooted and have their static IPs, use `192.168.1.10`, `192.168.1.11`, and `192.168.1.12` in the `apply-config` command instead of `<DHCP_...>`.*
+
+### Step 3 — Configure Local `talosctl` & Bootstrap
 *Wait ~2-3 minutes for the nodes to reboot and acquire their new static IPs.*
 
 ```bash
@@ -111,7 +125,7 @@ talosctl bootstrap
 talosctl kubeconfig ~/.kube
 ```
 
-### Step 6 — Verify Nodes
+### Step 4 — Verify Nodes
 ```bash
 kubectl get nodes
 ```
@@ -121,13 +135,13 @@ kubectl get nodes
 
 ## Phase 2: Install MetalLB (L4 Load Balancer)
 
-### Step 7 — Deploy MetalLB
+### Step 5 — Deploy MetalLB
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.16.1/config/manifests/metallb-native.yaml
 kubectl wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=90s
 ```
 
-### Step 8 — Create IP Pool
+### Step 6 — Create IP Pool
 > ⚠️ Change the `addresses` range to **unused IPs** in your local network.
 
 ```bash
@@ -156,13 +170,13 @@ EOF
 
 ## Phase 3: Install NGINX Ingress Controller (L7)
 
-### Step 9 — Deploy Ingress-NGINX
+### Step 7 — Deploy Ingress-NGINX
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/baremetal/deploy.yaml
 kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=120s
 ```
 
-### Step 10 — Verify External IP
+### Step 8 — Verify External IP
 ```bash
 kubectl get svc -n ingress-nginx ingress-nginx-controller
 ```
@@ -172,13 +186,13 @@ kubectl get svc -n ingress-nginx ingress-nginx-controller
 
 ## Phase 4: Install Cert-Manager (Automated TLS)
 
-### Step 11 — Deploy Cert-Manager
+### Step 9 — Deploy Cert-Manager
 ```bash
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml
 kubectl wait --namespace cert-manager --for=condition=ready pod --selector=app.kubernetes.io/instance=cert-manager --timeout=120s
 ```
 
-### Step 12 — Create Let's Encrypt ClusterIssuer
+### Step 10 — Create Let's Encrypt ClusterIssuer
 ```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: cert-manager.io/v1
@@ -202,7 +216,7 @@ EOF
 
 ## Phase 5: Test Everything
 
-### Step 13 — Deploy a Sample App
+### Step 11 — Deploy a Sample App
 ```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -262,7 +276,7 @@ spec:
 EOF
 ```
 
-### Step 14 — Final Verification
+### Step 12 — Final Verification
 ```bash
 kubectl get pods -A
 kubectl get ingress
@@ -271,7 +285,7 @@ kubectl get svc -A | grep LoadBalancer
 
 ---
 
-## Day-2 Operations Cheat Sheet
+## Operations Cheat Sheet
 
 ```bash
 # Upgrade Talos OS on a specific node
