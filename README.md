@@ -99,14 +99,19 @@ Now, re-run the patch and apply commands to push the DNS settings to the nodes:
 
 ```bash
 # Re-patch the base configs
-talosctl config patch controlplane.yaml --file patch-cp.yaml
-talosctl config patch worker.yaml --file patch-w1.yaml --output worker1.yaml
-talosctl config patch worker.yaml --file patch-w2.yaml --output worker2.yaml
+# Control Plane
+talosctl apply-config --insecure --nodes <CP_IP-Address> --file controlplane.yaml --config-patch @patch-cp.yaml
+
+# Worker 1
+talosctl apply-config --insecure --nodes <W1_IP-Address> --file worker.yaml --config-patch @patch-w1.yaml
+
+# Worker 2
+talosctl apply-config --insecure --nodes <W2_IP-Address> --file worker.yaml --config-patch @patch-w2.yaml
 
 # Re-apply to the nodes (using their DHCP IPs if they haven't rebooted yet, or static IPs if they have)
-talosctl apply-config --insecure --nodes <DHCP_CP> --file controlplane.yaml
-talosctl apply-config --insecure --nodes <DHCP_W1> --file worker1.yaml
-talosctl apply-config --insecure --nodes <DHCP_W2> --file worker2.yaml
+talosctl apply-config --insecure --nodes <CP_IP-Address> --file controlplane.yaml
+talosctl apply-config --insecure --nodes <W1_IP-Address> --file worker1.yaml
+talosctl apply-config --insecure --nodes <W2_IP-Address> --file worker2.yaml
 ```
 
 *Note: If your nodes already rebooted and have their static IPs, use `192.168.1.10`, `192.168.1.11`, and `192.168.1.12` in the `apply-config` command instead of `<DHCP_...>`.*
