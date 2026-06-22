@@ -8,13 +8,22 @@
 
 **1. Install CLI tools on your local machine:**
 ```bash
-# talosctl
-curl -sL https://github.com/siderolabs/talos/releases/download/v1.13.4/talosctl-$(uname -s | tr '[:upper:]' '[:lower:]')-amd64 -o /usr/local/bin/talosctl
-chmod +x /usr/local/bin/talosctl
+# 1. Ensure the directory exists
+sudo mkdir -p /usr/local/bin
 
-# kubectl
-curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/$(uname -s | tr '[:upper:]' '[:lower:]')/amd64/kubectl"
-chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+# 2. Download and install talosctl
+curl -sL https://github.com/siderolabs/talos/releases/download/v1.13.4/talosctl-linux-amd64 -o talosctl
+chmod +x talosctl
+sudo mv talosctl /usr/local/bin/
+
+# 3. Download and install kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+
+# 4. Verify they are installed correctly
+talosctl version --client
+kubectl version --client
 ```
 
 **2. Prepare 3 Machines:**
