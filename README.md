@@ -1,201 +1,156 @@
-# Talos-K8s-Cluster
-### Complete Talos Kubernetes Cluster Guide
-**1 Control Plane + 2 Workers | Static IPs**
-
----
-
-## How Talos Installation Works
-
-Before you start, understand this flow — skipping steps here causes the stuck-on-DHCP problem:
-
-```
-Boot ISO → apply-config → Talos installs to disk → node auto-reboots → boots from disk with static IP → detach ISO
-```
-
-**The ISO is only needed for the very first boot.** `apply-config` is what triggers Talos to write itself to disk and reboot. Once that reboot completes, the node runs from disk and the ISO can be detached.
-
-> ⚠️ **Critical:** If the ISO is attached and Talos is already on disk from a previous attempt, booting from the ISO will detect the existing install and skip the disk write. `apply-config` will return "Applied configuration without a reboot" and nothing changes. The fix is to detach the ISO, hard-reboot from the hypervisor, and re-run `apply-config` once the node comes back up.
+# Talos Linux — Kubernetes Home Lab
+### 1 Control Plane + 2 Workers | Static IPs
 
 ---
 
 ## Prerequisites
 
-### 1. Install CLI tools on your local machine
+Install tools on your **local machine**:
 
 ```bash
-# Create bin directory if it doesn't exist
-sudo mkdir -p /usr/local/bin
-
-# Download and install talosctl v1.13.4
+# talosctl
 curl -sL https://github.com/siderolabs/talos/releases/download/v1.13.4/talosctl-linux-amd64 -o talosctl
-chmod +x talosctl
-sudo mv talosctl /usr/local/bin/
+chmod +x talosctl && sudo mv talosctl /usr/local/bin/
 
-# Download and install kubectl
+# kubectl
 curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-chmod +x kubectl
-sudo mv kubectl /usr/local/bin/
+chmod +x kubectl && sudo mv kubectl /usr/local/bin/
 
-# Verify both are installed
+# verify
 talosctl version --client
 kubectl version --client
 ```
 
-### 2. Prepare 3 VMs
+---
 
-Boot 3 VMs using the **Talos v1.13.4 ISO**. For each VM:
+## Step 1 — Boot nodes from ISO
 
-- At least 2 CPUs, 2 GB RAM (4 GB recommended for control plane)
-- At least 20 GB disk attached — Talos installs itself here
-- Network set to **bridged adapter** so it gets a real LAN IP via DHCP
-- **Keep the ISO attached** for the first boot
+Download the ISO and flash it to USB or attach as a VM optical drive:
 
-Note the DHCP IP each VM receives. Check your router's lease table or watch the VM console — the IP is shown on the Talos dashboard screen.
+```bash
+curl -LO https://github.com/siderolabs/talos/releases/download/v1.13.4/metal-amd64.iso
 
-| Role          | DHCP IP (initial) | Target Static IP |
-|---------------|-------------------|------------------|
-| Control Plane | `<CP_DHCP_IP>`    | `10.0.1.20`      |
-| Worker 1      | `<W1_DHCP_IP>`    | `10.0.1.21`      |
-| Worker 2      | `<W2_DHCP_IP>`    | `10.0.1.22`      |
+# Bare metal — write to USB (replace /dev/sdX with your USB device)
+sudo dd if=metal-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync
+```
 
-> Adjust all IPs to match your network. Examples use `10.0.1.0/24` with gateway `10.0.1.2`.
+Boot all 3 machines from the ISO. Each will show a dashboard with its DHCP IP in the top-right corner. Note those IPs.
+
+| Role          | DHCP IP (temporary) | Target Static IP |
+|---------------|---------------------|------------------|
+| Control Plane | `<CP_DHCP_IP>`      | `10.0.1.20`      |
+| Worker 1      | `<W1_DHCP_IP>`      | `10.0.1.21`      |
+| Worker 2      | `<W2_DHCP_IP>`      | `10.0.1.22`      |
+
+> Adjust IPs to match your network. Examples use `10.0.1.0/24`, gateway `10.0.1.2`.
 
 ---
 
-## Phase 1: Install Talos & Bootstrap the Cluster
+## Step 2 — Find disk and interface names
 
-### Step 1 — Discover disk and interface names on each node
-
-Run these against each node's DHCP IP **before** creating any patch files.
+Run against each node's DHCP IP before generating any config:
 
 ```bash
-# Find the install disk name
+# Disk name (look for the main block device — /dev/sda, /dev/vda, /dev/nvme0n1)
 talosctl get disks -n <CP_DHCP_IP> --insecure
 
-# Find the network interface name
+# Interface name (look for the one that is "up" and link state "true")
 talosctl get links -n <CP_DHCP_IP> --insecure
 ```
 
-**For the disk:** look for the largest non-USB block device (e.g. `/dev/sda`, `/dev/vda`, `/dev/nvme0n1`). Note the one marked `SYSTEM_DISK` if present.
+Note the exact disk path and interface name — you'll use them in the next step.
 
-**For the interface:** look for the entry that shows `up` under OPER STATE and `true` under LINK STATE — that is your active NIC (e.g. `ens160`, `eth0`, `enp1s0`).
+---
 
-Repeat for all 3 nodes. They will likely have the same values if the VMs are identically configured.
+## Step 3 — Generate configs with static IP and install disk baked in
 
-### Step 2 — Generate base configs
+Run this on your local machine. Replace:
+- `10.0.1.20` → your control plane static IP
+- `ens160` → your actual interface name from Step 2
+- `/dev/sda` → your actual disk from Step 2
+- `10.0.1.2` → your gateway/DNS
 
 ```bash
-talosctl gen config my-talos-cluster https://10.0.1.20:6443
+talosctl gen config my-talos-cluster https://10.0.1.20:6443 \
+  --config-patch '[
+    {
+      "op": "add",
+      "path": "/machine/install",
+      "value": {
+        "disk": "/dev/sda",
+        "image": "ghcr.io/siderolabs/installer:v1.13.4",
+        "wipe": false
+      }
+    },
+    {
+      "op": "add",
+      "path": "/machine/network",
+      "value": {
+        "nameservers": ["10.0.1.2"],
+        "interfaces": [
+          {
+            "interface": "ens160",
+            "dhcp": false,
+            "addresses": ["10.0.1.20/24"],
+            "routes": [
+              {"network": "0.0.0.0/0", "gateway": "10.0.1.2"}
+            ]
+          }
+        ]
+      }
+    }
+  ]' \
+  --config-patch-worker '[
+    {
+      "op": "add",
+      "path": "/machine/install",
+      "value": {
+        "disk": "/dev/sda",
+        "image": "ghcr.io/siderolabs/installer:v1.13.4",
+        "wipe": false
+      }
+    }
+  ]'
 ```
 
-This produces three files:
+This generates `controlplane.yaml`, `worker.yaml`, and `talosconfig` in your current directory.
 
-- `controlplane.yaml` — applied to the control plane node
-- `worker.yaml` — applied to worker nodes
-- `talosconfig` — your local talosctl client config
+> The control plane config now has the static IP and install disk baked in. Workers share the same disk config but get their IPs applied individually in Step 4.
 
-### Step 3 — Create per-node patch files
+---
 
-Replace `ens160` with your actual interface name and `/dev/sda` with your actual disk device from Step 1.
+## Step 4 — Apply configs to each node
 
-**Control Plane (`patch-cp.yaml`):**
+Apply to each node using its current **DHCP IP**. The node installs Talos to disk and reboots automatically — the connection drops, that is normal.
 
 ```bash
-cat <<EOF > patch-cp.yaml
-machine:
-  install:
-    disk: /dev/sda
-    image: ghcr.io/siderolabs/installer:v1.13.4
-    wipe: false
-  network:
-    nameservers:
-      - 10.0.1.2
-    interfaces:
-      - interface: ens160
-        dhcp: false
-        addresses:
-          - 10.0.1.20/24
-        routes:
-          - network: 0.0.0.0/0
-            gateway: 10.0.1.2
-EOF
-```
-
-**Worker 1 (`patch-w1.yaml`):**
-
-```bash
-cat <<EOF > patch-w1.yaml
-machine:
-  install:
-    disk: /dev/sda
-    image: ghcr.io/siderolabs/installer:v1.13.4
-    wipe: false
-  network:
-    nameservers:
-      - 10.0.1.2
-    interfaces:
-      - interface: ens160
-        dhcp: false
-        addresses:
-          - 10.0.1.21/24
-        routes:
-          - network: 0.0.0.0/0
-            gateway: 10.0.1.2
-EOF
-```
-
-**Worker 2 (`patch-w2.yaml`):**
-
-```bash
-cat <<EOF > patch-w2.yaml
-machine:
-  install:
-    disk: /dev/sda
-    image: ghcr.io/siderolabs/installer:v1.13.4
-    wipe: false
-  network:
-    nameservers:
-      - 10.0.1.2
-    interfaces:
-      - interface: ens160
-        dhcp: false
-        addresses:
-          - 10.0.1.22/24
-        routes:
-          - network: 0.0.0.0/0
-            gateway: 10.0.1.2
-EOF
-```
-
-### Step 4 — Apply configs (this installs Talos to disk)
-
-Apply to each node using its current **DHCP IP**. Each node will install Talos to disk and reboot automatically — the connection will drop mid-command, that is expected.
-
-```bash
-# Control plane
+# Control plane (uses the already-patched controlplane.yaml)
 talosctl apply-config --insecure \
   -n <CP_DHCP_IP> -e <CP_DHCP_IP> \
-  --file controlplane.yaml \
-  --config-patch @patch-cp.yaml
+  --file controlplane.yaml
+```
 
+For workers, inject each worker's static IP on the fly:
+
+```bash
 # Worker 1
 talosctl apply-config --insecure \
   -n <W1_DHCP_IP> -e <W1_DHCP_IP> \
   --file worker.yaml \
-  --config-patch @patch-w1.yaml
+  --config-patch '[{"op":"add","path":"/machine/network","value":{"nameservers":["10.0.1.2"],"interfaces":[{"interface":"ens160","dhcp":false,"addresses":["10.0.1.21/24"],"routes":[{"network":"0.0.0.0/0","gateway":"10.0.1.2"}]}]}}]'
 
 # Worker 2
 talosctl apply-config --insecure \
   -n <W2_DHCP_IP> -e <W2_DHCP_IP> \
   --file worker.yaml \
-  --config-patch @patch-w2.yaml
+  --config-patch '[{"op":"add","path":"/machine/network","value":{"nameservers":["10.0.1.2"],"interfaces":[{"interface":"ens160","dhcp":false,"addresses":["10.0.1.22/24"],"routes":[{"network":"0.0.0.0/0","gateway":"10.0.1.2"}]}]}}]'
 ```
 
-You should see the connection hang or drop — this means the node is installing and rebooting. If it returns instantly with "Applied configuration without a reboot", see the Troubleshooting section.
+Wait 3–5 minutes for all nodes to install and reboot.
 
-### Step 5 — Wait for nodes to come up at their static IPs
+---
 
-Each node takes 2–4 minutes to install and reboot. Ping to confirm:
+## Step 5 — Verify static IPs
 
 ```bash
 ping -c 3 10.0.1.20
@@ -203,17 +158,11 @@ ping -c 3 10.0.1.21
 ping -c 3 10.0.1.22
 ```
 
-All three should respond. Verify the addresses are correct:
+All three should respond. You can now detach the ISO from all VMs.
 
-```bash
-talosctl get addresses -n 10.0.1.20 --insecure
-talosctl get addresses -n 10.0.1.21 --insecure
-talosctl get addresses -n 10.0.1.22 --insecure
-```
+---
 
-Each should show its static IP (e.g. `10.0.1.20/24`) on `ens160`, not the old DHCP address.
-
-### Step 6 — Configure talosctl to use the control plane static IP
+## Step 6 — Configure talosctl
 
 ```bash
 talosctl config merge ./talosconfig
@@ -221,33 +170,41 @@ talosctl config endpoint 10.0.1.20
 talosctl config node 10.0.1.20
 ```
 
-### Step 7 — Bootstrap etcd
+---
 
-Run this **once only**, against the control plane:
+## Step 7 — Bootstrap etcd
+
+Run **once only** on the control plane:
 
 ```bash
 talosctl bootstrap -n 10.0.1.20 -e 10.0.1.20
 ```
 
-This starts etcd and brings up the Kubernetes control plane. It takes 2–3 minutes. You can watch progress with:
+Watch progress:
 
 ```bash
 talosctl dashboard -n 10.0.1.20 -e 10.0.1.20
 ```
 
-### Step 8 — Fetch kubeconfig
+Wait until the dashboard shows stage `Running` (~3 minutes).
+
+---
+
+## Step 8 — Get kubeconfig
 
 ```bash
 talosctl kubeconfig ~/.kube/config -n 10.0.1.20 -e 10.0.1.20
 ```
 
-### Step 9 — Verify all nodes are Ready
+---
+
+## Step 9 — Verify cluster
 
 ```bash
 kubectl get nodes -o wide
 ```
 
-Expected output:
+Expected:
 
 ```
 NAME   STATUS   ROLES           AGE   VERSION   INTERNAL-IP
@@ -256,13 +213,9 @@ w1     Ready    <none>          4m    v1.33.x   10.0.1.21
 w2     Ready    <none>          4m    v1.33.x   10.0.1.22
 ```
 
-You can now safely detach the ISO from all VMs.
-
 ---
 
-## Phase 2: Install MetalLB (L4 Load Balancer)
-
-### Step 10 — Deploy MetalLB
+## Step 10 — Install MetalLB
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.16.1/config/manifests/metallb-native.yaml
@@ -273,9 +226,7 @@ kubectl wait --namespace metallb-system \
   --timeout=90s
 ```
 
-### Step 11 — Create IP address pool
-
-> ⚠️ The address range must be unused IPs on your LAN — outside your router's DHCP pool and not assigned to any device.
+Create an IP pool from unused IPs on your LAN:
 
 ```bash
 cat <<EOF | kubectl apply -f -
@@ -301,11 +252,7 @@ EOF
 
 ---
 
-## Phase 3: Install NGINX Ingress Controller (L7)
-
-> ⚠️ The community `kubernetes/ingress-nginx` project was retired in March 2026. v1.15.1 is its final release with no further security updates. For new deployments consider [NGINX Gateway Fabric](https://github.com/nginxinc/nginx-gateway-fabric).
-
-### Step 12 — Deploy ingress-nginx
+## Step 11 — Install NGINX Ingress
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/baremetal/deploy.yaml
@@ -314,21 +261,14 @@ kubectl wait --namespace ingress-nginx \
   --for=condition=ready pod \
   --selector=app.kubernetes.io/component=controller \
   --timeout=120s
-```
 
-### Step 13 — Verify external IP
-
-```bash
+# Verify external IP was assigned by MetalLB
 kubectl get svc -n ingress-nginx ingress-nginx-controller
 ```
 
-`EXTERNAL-IP` should show an IP from your MetalLB pool (e.g. `10.0.1.200`). If it shows `<pending>`, wait 30 seconds and try again.
-
 ---
 
-## Phase 4: Install Cert-Manager (Automated TLS)
-
-### Step 14 — Deploy cert-manager
+## Step 12 — Install Cert-Manager
 
 ```bash
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml
@@ -339,9 +279,7 @@ kubectl wait --namespace cert-manager \
   --timeout=120s
 ```
 
-### Step 15 — Create Let's Encrypt ClusterIssuer
-
-> Replace `your-email@example.com` with your real email address.
+Create a Let's Encrypt issuer (replace the email):
 
 ```bash
 cat <<EOF | kubectl apply -f -
@@ -364,9 +302,7 @@ EOF
 
 ---
 
-## Phase 5: Test Everything
-
-### Step 16 — Deploy a sample app
+## Step 13 — Deploy test app
 
 ```bash
 cat <<EOF | kubectl apply -f -
@@ -427,7 +363,7 @@ spec:
 EOF
 ```
 
-### Step 17 — Final verification
+Final check:
 
 ```bash
 kubectl get pods -A
@@ -438,84 +374,54 @@ kubectl get svc -A | grep LoadBalancer
 
 ---
 
-## Operations Cheat Sheet
+## Operations
 
 ```bash
-# Upgrade Talos OS on a node
-talosctl upgrade \
-  -n 10.0.1.20 -e 10.0.1.20 \
-  --image ghcr.io/siderolabs/installer:v1.13.4
-
-# Upgrade Kubernetes control plane
-talosctl upgrade-k8s \
-  -n 10.0.1.20 -e 10.0.1.20 \
-  --to 1.33.1
-
-# View logs for a service on a node
-talosctl logs kubelet -n 10.0.1.20 -e 10.0.1.20
-
-# List all services and their state
-talosctl services -n 10.0.1.20 -e 10.0.1.20
-
-# View kernel logs
-talosctl dmesg -n 10.0.1.20 -e 10.0.1.20
-
-# Open the live dashboard for a node
+# Live node dashboard
 talosctl dashboard -n 10.0.1.20 -e 10.0.1.20
 
-# Reset a worker node to maintenance mode (keeps Talos on disk, wipes config)
-talosctl reset \
-  -n 10.0.1.21 -e 10.0.1.20 \
-  --graceful=false \
-  --system-labels-to-wipe STATE
+# Service states
+talosctl services -n 10.0.1.20 -e 10.0.1.20
+
+# Kubelet logs
+talosctl logs kubelet -n 10.0.1.20 -e 10.0.1.20
+
+# Kernel logs
+talosctl dmesg -n 10.0.1.20 -e 10.0.1.20
+
+# Upgrade Talos OS
+talosctl upgrade -n 10.0.1.20 -e 10.0.1.20 \
+  --image ghcr.io/siderolabs/installer:v1.13.4
+
+# Upgrade Kubernetes
+talosctl upgrade-k8s -n 10.0.1.20 -e 10.0.1.20 --to 1.33.1
+
+# Reset a worker (wipes config, keeps Talos on disk)
+talosctl reset -n 10.0.1.21 -e 10.0.1.20 \
+  --graceful=false --system-labels-to-wipe STATE
 ```
 
 ---
 
 ## Troubleshooting
 
-### "Applied configuration without a reboot"
+**"Applied configuration without a reboot"**
+The ISO is booted but Talos is already on disk from a previous attempt. Detach the ISO, hard-reboot the VM from the hypervisor, wait for it to come back up at its DHCP IP, then re-run the `apply-config` command.
 
-**Cause:** The node booted from the ISO but Talos was already on disk from a previous apply. The ISO detects the existing install and skips the disk write entirely.
+**Node won't boot after removing ISO**
+Talos was never written to disk. Re-attach the ISO, boot, and re-run `apply-config`. Only detach the ISO after the node is reachable at its static IP.
 
-**Fix:**
-1. Detach the ISO from the VM in your hypervisor
-2. Hard-reboot the VM (power off → power on)
-3. Wait for it to come up — it will boot from disk into maintenance mode at its DHCP IP
-4. Re-run the `apply-config` command from Step 4
+**Node still on DHCP after reboot**
+Wrong interface name in the config. Run `talosctl get links -n <IP> --insecure` and confirm the name matches exactly what is in your config.
 
-### Node won't boot after detaching ISO
+**"x509: certificate signed by unknown authority"**
+Add `--insecure` when talking to a node that has not been bootstrapped yet. Drop it after bootstrapping.
 
-**Cause:** Talos was never successfully installed to disk — the `apply-config` returned early before writing anything.
-
-**Fix:** Re-attach the ISO, boot the VM, wait for maintenance mode, then re-run `apply-config`. The `install:` block in the patch is what tells Talos to write itself to disk. Do not detach the ISO until the node has come back up at its static IP.
-
-### "x509: certificate signed by unknown authority"
-
-**Cause:** You are trying to use a signed talosconfig to talk to a node that is still in maintenance mode (no PKI yet), or vice versa.
-
-**Fix:** Use `--insecure` for any node that has not been bootstrapped yet. After bootstrapping, drop `--insecure` and use the merged talosconfig.
-
-### "specified install disk does not exist"
-
-**Cause:** The `disk:` value in the patch does not match the actual block device on the VM.
-
-**Fix:** Run `talosctl get disks -n <IP> --insecure` and copy the exact device name into the patch.
-
-### talosctl "unknown command" errors with IP addresses
-
-**Cause:** Flags must come **after** the subcommand name, not before it.
-
+**talosctl "unknown command" with an IP address**
+Flags must come after the subcommand:
 ```bash
 # Wrong
 talosctl --insecure --nodes 10.0.1.20 get links
-
 # Correct
 talosctl get links -n 10.0.1.20 --insecure
 ```
-
-### Node stays on DHCP even after reboot
-
-**Cause:** The patch is missing `dhcp: false`, so Talos runs both DHCP and the static config simultaneously. DHCP wins for routing.
-
-**Fix:** Ensure `dhcp: false` is present in the interface block of your patch, as shown in Step 3.
