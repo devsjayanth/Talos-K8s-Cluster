@@ -1,49 +1,28 @@
 # Talos Linux — Kubernetes
 ### 1 Control Plane + 2 Workers | Static IPs
-Before generating or applying your configs, you need to boot the node from the Talos ISO. Once it boots and gets a DHCP IP, run these commands from your local machine to find the exact disk and network interface names.
+Here is the complete, corrected, and optimized step-by-step guide for Talos v1.13.
 
-*(Replace `<DHCP_IP>` with the IP shown on the node's screen, e.g., `10.0.1.132`)*
-
-### 1. Find the Network Interface
-```bash
-talosctl get links -n <DHCP_IP> --insecure
-```
-**What to look for:**
-Look for the interface where `OPER STATE` is **`up`** and `LINK STATE` is **`true`**. 
-*   Ignore `lo` (loopback).
-*   The name will be something like `ens160`, `eth0`, or `enp2s0`. **Write this down.**
-
-### 2. Find the Install Disk
-```bash
-talosctl get disks -n <DHCP_IP> --insecure
-```
-**What to look for:**
-Look at the `ID` column to find your main hard drive/SSD. 
-*   **Ignore `sr0`** (this is the CD-ROM/ISO drive).
-*   The main disk will be something like `sda`, `vda`, or `nvme0n1`. **Write this down.**
-*   *Note: You must prepend `/dev/` to this name in your config (e.g., `/dev/sda` or `/dev/nvme0n1`).*
-
-### 3. Verify the Current IP and Routes (Optional but recommended)
-```bash
-talosctl get addresses -n <DHCP_IP> --insecure
-```
-**What to look for:**
-This confirms the node actually received a DHCP IP and shows you the current subnet and gateway, which helps you plan your static IP.
+### Prerequisites
+*   Boot all 3 nodes from the Talos ISO. Note their **DHCP IPs**.
+*   Define your variables:
+    *   **`<DISK>`**: Install disk (e.g., `/dev/nvme0n1` or `/dev/sda`)
+    *   **`<IFACE>`**: Network interface (e.g., `ens160`)
+    *   **`<GW>`**: Gateway IP (e.g., `10.0.1.2`)
+    *   **`<CP_IP>`**, **`<W1_IP>`**, **`<W2_IP>`**: Target static IPs
 
 ---
 
-### Summary of what you need to write down:
-1.  **DHCP IP:** (e.g., `10.0.1.132`)
-2.  **Network Interface:** (e.g., `ens160`)
-3.  **Disk Name:** (e.g., `/dev/nvme0n1`)
-4.  **Gateway IP:** (Usually your router, e.g., `10.0.1.2`)
+### Step 1: Discover Disk and Interface
+Run these against the Control Plane's DHCP IP to confirm your disk and interface names:
+```bash
+talosctl get disks -n <CP_DHCP_IP> --insecure   # Note the main disk (ignore sr0)
+talosctl get links -n <CP_DHCP_IP> --insecure   # Note the interface with state "up"
+```
 
 ---
-Talos will automatically match the `HostnameConfig` block to the hostname document and the `machine:` block to the main network document.
 
-Here is the cleanest way to do it.
-
-### 1. Create the Combined Patch Files
+### Step 2: Create Patch Files
+Because Talos v1.13 uses multi-document configs, we combine the `HostnameConfig` and `machine.network` into single patch files.
 
 **Control Plane (`cp-patch.yaml`):**
 ```bash
@@ -57,15 +36,15 @@ hostname: k8s-control-1
 machine:
   network:
     nameservers:
-      - 10.0.1.2
+      - <GW>
     interfaces:
-      - interface: ens160
+      - interface: <IFACE>
         dhcp: false
         addresses:
-          - 10.0.1.20/24
+          - <CP_IP>/24
         routes:
           - network: 0.0.0.0/0
-            gateway: 10.0.1.2
+            gateway: <GW>
 EOF
 ```
 
@@ -81,41 +60,104 @@ hostname: k8s-worker-1
 machine:
   network:
     nameservers:
-      - 10.0.1.2
+      - <GW>
     interfaces:
-      - interface: ens160
+      - interface: <IFACE>
         dhcp: false
         addresses:
-          - 10.0.1.21/24
+          - <W1_IP>/24
         routes:
           - network: 0.0.0.0/0
-            gateway: 10.0.1.2
+            gateway: <GW>
 EOF
 ```
 
-*(Create `w2-patch.yaml` for Worker 2 by changing the hostname to `k8s-worker-2` and IP to `10.0.1.22/24`)*
-
-### 2. Generate Base Configs (No patches needed here)
+**Worker 2 (`w2-patch.yaml`):**
 ```bash
-talosctl gen config my-cluster https://10.0.1.20:6443 \
-  --install-disk /dev/nvme0n1 \
+cat <<'EOF' > w2-patch.yaml
+---
+apiVersion: v1alpha1
+kind: HostnameConfig
+auto: off
+hostname: k8s-worker-2
+---
+machine:
+  network:
+    nameservers:
+      - <GW>
+    interfaces:
+      - interface: <IFACE>
+        dhcp: false
+        addresses:
+          - <W2_IP>/24
+        routes:
+          - network: 0.0.0.0/0
+            gateway: <GW>
+EOF
+```
+
+---
+
+### Step 3: Generate Base Configs
+Generate the base configs with the install disk and image baked in.
+```bash
+talosctl gen config my-cluster https://<CP_IP>:6443 \
+  --install-disk <DISK> \
   --install-image ghcr.io/siderolabs/installer:v1.13.4 \
   --force
 ```
 
-### 3. Apply the Single Patch File to Each Node
+---
 
-**Control Plane:**
+### Step 4: Apply Configs
+Apply the base config + patch to each node. **Detach the ISO from all VMs after applying.**
+
+**1. Control Plane:**
 ```bash
-talosctl apply-config --insecure -n 10.0.1.133 --file controlplane.yaml --config-patch @cp-patch.yaml
+talosctl apply-config --insecure -n <CP_DHCP_IP> --file controlplane.yaml --config-patch @cp-patch.yaml
 ```
+*(Wait 3-5 minutes for it to reboot to `<CP_IP>`)*
 
-**Worker 1:**
+**2. Worker 1:**
 ```bash
 talosctl apply-config --insecure -n <W1_DHCP_IP> --file worker.yaml --config-patch @w1-patch.yaml
 ```
 
-**Worker 2:**
+**3. Worker 2:**
 ```bash
 talosctl apply-config --insecure -n <W2_DHCP_IP> --file worker.yaml --config-patch @w2-patch.yaml
 ```
+
+---
+
+### Step 5: Bootstrap and Get Kubeconfig
+Once the Control Plane is back online at its static IP:
+
+```bash
+# 1. Merge client credentials
+talosctl config merge ./talosconfig
+talosctl config endpoints <CP_IP>
+talosctl config nodes <CP_IP>
+
+# 2. Bootstrap etcd (Run ONLY ONCE)
+talosctl bootstrap -n <CP_IP> -e <CP_IP>
+
+# 3. Download kubeconfig
+talosctl kubeconfig -n <CP_IP> -e <CP_IP> -f
+# This saves the config to ~/.kube/config and overwrites any existing file (-f).
+```
+
+---
+
+### Step 6: Verify Cluster Health
+Wait 2-3 minutes after bootstrap for the API server to fully initialize.
+
+```bash
+# 1. Check Talos OS level health
+talosctl health -n <CP_IP> -e <CP_IP>
+# (Wait until all checks say "OK")
+
+# 2. Check Kubernetes nodes
+kubectl get nodes
+```
+*Expected output: All 3 nodes should show `STATUS` as `Ready`.*
