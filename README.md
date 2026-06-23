@@ -1,5 +1,5 @@
 # Talos Linux — Kubernetes
-### 1 Control Plane + 2 Workers | Static IPs
+### 1 Control Plane + 2 Workers
 Here is the complete, corrected, and optimized step-by-step guide for Talos v1.13.
 
 ### Prerequisites
