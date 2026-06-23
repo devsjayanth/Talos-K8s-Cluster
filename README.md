@@ -1,6 +1,6 @@
 # Talos-K8s-Cluster
 ### Complete Talos Kubernetes Cluster Guide
-**1 Control Plane + 2 Workers | Static IPs | June 2026**
+**1 Control Plane + 2 Workers | Static IPs**
 
 ---
 
@@ -27,7 +27,7 @@ kubectl version --client
 ```
 
 **2. Prepare 3 Machines:**
-Boot 3 VMs/bare-metal machines using the **Talos v1.13.4 ISO**. 
+Boot 3 VMs/bare-metal machines using the **Talos v1.13.4 ISO**.
 Note their **initial DHCP IPs** (assigned by your router) and their **network interface names** (e.g., `eth0`, `ens192`):
 *   Control Plane: `<DHCP_CP>` -> Target Static: `192.168.1.10`
 *   Worker 1: `<DHCP_W1>` -> Target Static: `192.168.1.11`
@@ -44,9 +44,9 @@ talosctl gen config my-talos-cluster https://192.168.1.10:6443
 ```
 
 ### Step 2 — Create Static IP Patches
-*⚠️ Change `eth0` to your actual interface name. Update IPs, CIDR (`/24`), and Gateway to match your network.*
+*⚠️ Change `ens160` to your actual interface name. Update IPs, CIDR (`/24`), and Gateway to match your network.*
 
-### 1. Create the Patch Files
+#### 1. Create the Patch Files
 
 **Control Plane (`patch-cp.yaml`):**
 ```bash
@@ -99,44 +99,34 @@ machine:
 EOF
 ```
 
-### 2. Apply the Configs
-Now run the apply commands again:
+#### 2. Apply the Configs
+
+Apply the configs to each node using its **current DHCP IP** and the correct patch file. The nodes will reboot into their static IPs.
 
 ```bash
 # Control Plane
-talosctl apply-config --insecure --nodes <W1_DHCP_IP> --file controlplane.yaml --config-patch @patch-cp.yaml
+talosctl apply-config --insecure --nodes <CP_DHCP_IP> --file controlplane.yaml --config-patch @patch-cp.yaml
 
-# Workers (Replace with their actual current DHCP IPs)
+# Workers (replace with their actual current DHCP IPs)
 talosctl apply-config --insecure --nodes <W1_DHCP_IP> --file worker.yaml --config-patch @patch-w1.yaml
 talosctl apply-config --insecure --nodes <W2_DHCP_IP> --file worker.yaml --config-patch @patch-w2.yaml
 ```
 
-The nodes will now accept the configuration, reboot, and come up with their static IPs and DNS correctly configured!
-
-### 2. Re-apply the Patches and Configs
-Now, re-run the patch and apply commands to push the DNS settings to the nodes:
-
-```bash
-# Re-apply to the nodes (using their DHCP IPs if they haven't rebooted yet, or static IPs if they have)
-talosctl apply-config --insecure --nodes <CP_IP-Address> --file controlplane.yaml
-talosctl apply-config --insecure --nodes <W1_IP-Address> --file worker1.yaml
-talosctl apply-config --insecure --nodes <W2_IP-Address> --file worker2.yaml
-```
-
-*Note: If your nodes already rebooted and have their static IPs, use `192.168.1.10`, `192.168.1.11`, and `192.168.1.12` in the `apply-config` command instead of `<DHCP_...>`.*
+*Wait ~2-3 minutes for all nodes to reboot and acquire their static IPs before continuing.*
 
 ### Step 3 — Configure Local `talosctl` & Bootstrap
-*Wait ~2-3 minutes for the nodes to reboot and acquire their new static IPs.*
 
 ```bash
-# Merge config and point to the NEW static IPs
+# Merge talosconfig into ~/.talos/config and point to the new static CP IP
 talosctl config merge ./talosconfig
 talosctl config endpoints 192.168.1.10
 talosctl config nodes 192.168.1.10
 
-# Bootstrap etcd and get kubeconfig
+# Bootstrap etcd (run once, on the control plane node only)
 talosctl bootstrap
-talosctl kubeconfig ~/.kube
+
+# Fetch kubeconfig and merge it into ~/.kube/config
+talosctl kubeconfig ~/.kube/config
 ```
 
 ### Step 4 — Verify Nodes
@@ -152,7 +142,10 @@ kubectl get nodes
 ### Step 5 — Deploy MetalLB
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.16.1/config/manifests/metallb-native.yaml
-kubectl wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=90s
+kubectl wait --namespace metallb-system \
+  --for=condition=ready pod \
+  --selector=app=metallb \
+  --timeout=90s
 ```
 
 ### Step 6 — Create IP Pool
@@ -184,10 +177,15 @@ EOF
 
 ## Phase 3: Install NGINX Ingress Controller (L7)
 
+> ⚠️ **Note:** The community `ingress-nginx` project (kubernetes/ingress-nginx) was retired in March 2026. Version v1.15.1 is its final release and receives no further security updates. For new deployments consider [NGINX Gateway Fabric](https://github.com/nginxinc/nginx-gateway-fabric) (Gateway API) or another actively maintained ingress controller.
+
 ### Step 7 — Deploy Ingress-NGINX
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/baremetal/deploy.yaml
-kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=120s
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=120s
 ```
 
 ### Step 8 — Verify External IP
@@ -203,7 +201,10 @@ kubectl get svc -n ingress-nginx ingress-nginx-controller
 ### Step 9 — Deploy Cert-Manager
 ```bash
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml
-kubectl wait --namespace cert-manager --for=condition=ready pod --selector=app.kubernetes.io/instance=cert-manager --timeout=120s
+kubectl wait --namespace cert-manager \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/instance=cert-manager \
+  --timeout=120s
 ```
 
 ### Step 10 — Create Let's Encrypt ClusterIssuer
@@ -222,7 +223,7 @@ spec:
     solvers:
     - http01:
         ingress:
-          class: nginx
+          ingressClassName: nginx
 EOF
 ```
 
