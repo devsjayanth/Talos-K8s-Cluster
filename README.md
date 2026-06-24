@@ -1,4 +1,4 @@
-# Talos Linux — Kubernetes
+# ⚓Talos Linux — Kubernetes
 ### 1 Control Plane + 2 Workers
 Here is the complete, corrected, and optimized step-by-step guide for Talos v1.13.
 
@@ -163,7 +163,7 @@ kubectl get nodes
 *Expected output: All 3 nodes should show `STATUS` as `Ready`.*
 
 ---
-# Volume Setup
+# 💾Volume Setup
 Because Talos Linux is an immutable OS, you cannot SSH into the node to format the disk with `mkfs`. Instead, you must use a **CSI (Container Storage Interface) driver** that runs as a privileged pod, detects the raw blank disk, formats it, and mounts it for Kubernetes.
 
 The best and easiest tool for raw local disks is **OpenEBS LocalPV**.
