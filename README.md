@@ -219,29 +219,36 @@ EOF
 
 ### Step 4: Create a Persistent Volume Claim (PVC)
 Now, request storage from this new StorageClass. OpenEBS will automatically find the blank `nvme1n1` drive on Worker 2, format it to `ext4`, and bind it.
+OpenEBS will use the entire NVMe drive regardless of what you request. The size only matters for Kubernetes scheduling decisions.
 
+### Quick test workflow:
+
+**1. Create the PVC:**
 ```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: test-nvme-pvc
+  name: nvme-pvc
 spec:
   accessModes:
     - ReadWriteOnce
   storageClassName: local-nvme
   resources:
     requests:
-      storage: 10Gi
+      storage: 10Mi
 EOF
 ```
 
-Check the status:
+**2. Check status:**
 ```bash
-kubectl get pvc test-nvme-pvc
+kubectl get pvc nvme-pvc
 ```
-*Wait a few seconds. The `STATUS` should change from `Pending` to `Bound`.*
+Wait for `STATUS: Bound` (should take 10-30 seconds).
 
-### Important Notes:
-*   **Node Affinity:** Because this is a *local* disk, the PVC is strictly tied to **Worker 2**. If Worker 2 goes down, any pod using this PVC will be stuck in `Pending` until Worker 2 comes back online.
-*   **Reclaim Policy:** The StorageClass is set to `Delete`. If you delete the PVC, OpenEBS will wipe the disk and it will be available for the next PVC. If you want to keep the data after deleting the PVC, change `reclaimPolicy: Delete` to `reclaimPolicy: Retain` in Step 3.
+**3. Verify which drive it claimed:**
+```bash
+kubectl get pv
+kubectl describe pv $(kubectl get pvc nvme-pvc -o jsonpath='{.spec.volumeName}')
+```
+Look for the `Path` field - it will show `/dev/nvme1n1` (or whatever the blank drive was).
