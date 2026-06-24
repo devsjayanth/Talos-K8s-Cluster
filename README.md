@@ -201,7 +201,16 @@ helm install openebs openebs/openebs \
   --set localpv.device.enabled=true \
   --set openebs-ndm.enabled=true
 ```
-
+Now verify everything is running:
+1. Check pods:
+```
+kubectl get pods -n openebs
+```
+2. Check StorageClasses:
+```
+kubectl get sc
+```
+You should see "openebs-device" already created by OpenEBS.
 ---
 
 ### Step 3: Create a StorageClass
