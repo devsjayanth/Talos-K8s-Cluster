@@ -182,16 +182,24 @@ talosctl get disks -n <W2_STATIC_IP>
 ### Step 2: Install OpenEBS LocalPV Provisioner
 If you don't have Helm installed, install it first:
 ```bash
+export VERIFY_CHECKSUM=false
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+helm version
 ```
 
 Add the OpenEBS repo and install the LocalPV provisioner:
 ```bash
-helm repo add openebs-localpv https://openebs.github.io/localpv-provisioner
+helm repo add openebs https://openebs.github.io/charts
 helm repo update
-
-helm install openebs-localpv openebs-localpv/localpv-provisioner \
-  -n openebs --create-namespace
+```
+Install OpenEBS with LocalPV Device support:
+```
+helm install openebs openebs/openebs \
+  --namespace openebs \
+  --create-namespace \
+  --set localpv.enabled=true \
+  --set localpv.device.enabled=true \
+  --set openebs-ndm.enabled=true
 ```
 
 ---
