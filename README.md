@@ -161,3 +161,87 @@ talosctl health -n <CP_IP> -e <CP_IP>
 kubectl get nodes
 ```
 *Expected output: All 3 nodes should show `STATUS` as `Ready`.*
+
+---
+# Volume Setup
+Because Talos Linux is an immutable OS, you cannot SSH into the node to format the disk with `mkfs`. Instead, you must use a **CSI (Container Storage Interface) driver** that runs as a privileged pod, detects the raw blank disk, formats it, and mounts it for Kubernetes.
+
+The best and easiest tool for raw local disks is **OpenEBS LocalPV**.
+
+Here is the step-by-step guide to setting it up.
+
+### Step 1: Verify the disk is visible to Talos
+Check if Talos sees the new blank NVMe drive on Worker 2:
+```bash
+talosctl get disks -n <W2_STATIC_IP>
+```
+*Note the ID of the new blank drive (e.g., `nvme1n1`). Do not include `/dev/` in the next steps, just the ID.*
+
+---
+
+### Step 2: Install OpenEBS LocalPV Provisioner
+If you don't have Helm installed, install it first:
+```bash
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+```
+
+Add the OpenEBS repo and install the LocalPV provisioner:
+```bash
+helm repo add openebs-localpv https://openebs.github.io/localpv-provisioner
+helm repo update
+
+helm install openebs-localpv openebs-localpv/localpv-provisioner \
+  -n openebs --create-namespace
+```
+
+---
+
+### Step 3: Create a StorageClass
+Create a StorageClass that tells Kubernetes to use the OpenEBS provisioner to format raw disks.
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-nvme
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: local.csi.openebs.io
+parameters:
+  fsType: ext4
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+EOF
+```
+
+---
+
+### Step 4: Create a Persistent Volume Claim (PVC)
+Now, request storage from this new StorageClass. OpenEBS will automatically find the blank `nvme1n1` drive on Worker 2, format it to `ext4`, and bind it.
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-nvme-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-nvme
+  resources:
+    requests:
+      storage: 10Gi
+EOF
+```
+
+Check the status:
+```bash
+kubectl get pvc test-nvme-pvc
+```
+*Wait a few seconds. The `STATUS` should change from `Pending` to `Bound`.*
+
+### Important Notes:
+*   **Node Affinity:** Because this is a *local* disk, the PVC is strictly tied to **Worker 2**. If Worker 2 goes down, any pod using this PVC will be stuck in `Pending` until Worker 2 comes back online.
+*   **Reclaim Policy:** The StorageClass is set to `Delete`. If you delete the PVC, OpenEBS will wipe the disk and it will be available for the next PVC. If you want to keep the data after deleting the PVC, change `reclaimPolicy: Delete` to `reclaimPolicy: Retain` in Step 3.
