@@ -211,6 +211,8 @@ kubectl get pods -n openebs
 kubectl get sc
 ```
 You should see "openebs-device" already created by OpenEBS.
+
+
 ---
 
 ### Step 3: Create a StorageClass
