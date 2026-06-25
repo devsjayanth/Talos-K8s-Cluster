@@ -163,111 +163,62 @@ kubectl get nodes
 *Expected output: All 3 nodes should show `STATUS` as `Ready`.*
 
 ---
-# 💾Volume Setup
-Because Talos Linux is an immutable OS, you cannot SSH into the node to format the disk with `mkfs`. Instead, you must use a **CSI (Container Storage Interface) driver** that runs as a privileged pod, detects the raw blank disk, formats it, and mounts it for Kubernetes.
+# 💾Volume Setup- Talos Storage Preparation & OpenEBS
 
-The best and easiest tool for raw local disks is **OpenEBS LocalPV**.
+Because Talos is an immutable OS, you must explicitly allow Kubelet to mount host directories for `openebs-hostpath`, and label namespaces to allow OpenEBS to run privileged init pods.
 
-Here is the step-by-step guide to setting it up.
+### Step 1: Patch Talos Machine Config for HostPath
+Run this to allow OpenEBS to write to `/var/openebs/local`. **Repeat for all 3 nodes** (Control Plane and both Workers).
 
-### Step 1: Verify the disk is visible to Talos
-Check if Talos sees the new blank NVMe drive on Worker 2:
 ```bash
-talosctl get disks -n <W2_STATIC_IP>
+cat <<EOF > openebs-mount-patch.yaml
+machine:
+  kubelet:
+    extraMounts:
+      - destination: /var/openebs/local
+        type: bind
+        source: /var/openebs/local
+        options: [ bind, rshared, rw ]
+EOF
+
+# Apply to Control Plane
+talosctl patch mc -n <CP_IP> --patch @openebs-mount-patch.yaml
+
+# Apply to Workers
+talosctl patch mc -n <W1_IP> --patch @openebs-mount-patch.yaml
+talosctl patch mc -n <W2_IP> --patch @openebs-mount-patch.yaml
 ```
-*Note the ID of the new blank drive (e.g., `nvme1n1`). Do not include `/dev/` in the next steps, just the ID.*
+*(Wait ~30-60 seconds for the kubelets to restart on all nodes).*
 
----
+### Step 2: Install OpenEBS
+Install the OpenEBS Helm chart to provision both host-path (folders) and device (raw disks) storage.
 
-### Step 2: Install OpenEBS LocalPV Provisioner
-If you don't have Helm installed, install it first:
-```bash
-export VERIFY_CHECKSUM=false
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-helm version
-```
-
-Add the OpenEBS repo and install the LocalPV provisioner:
 ```bash
 helm repo add openebs https://openebs.github.io/charts
 helm repo update
-```
-Install OpenEBS with LocalPV Device support:
-```
-helm install openebs openebs/openebs \
-  --namespace openebs \
-  --create-namespace \
+
+helm install openebs openebs/openebs --namespace openebs --create-namespace \
   --set localpv.enabled=true \
   --set localpv.device.enabled=true \
   --set openebs-ndm.enabled=true
 ```
-Now verify everything is running:
-1. Check pods:
+
+### Step 3: Label Namespaces for Pod Security
+Talos blocks privileged pods by default. We must allow them in `openebs` (for raw disk formatting).
+
+```bash
+  kubectl label --overwrite ns openebs \
+    pod-security.kubernetes.io/enforce=privileged \
+    pod-security.kubernetes.io/warn=privileged \
+    pod-security.kubernetes.io/audit=privileged
 ```
-kubectl get pods -n openebs
-```
-2. Check StorageClasses:
-```
+
+### Step 4: Verify StorageClasses
+OpenEBS automatically creates the required StorageClasses. You do **not** need to create them manually.
+
+```bash
 kubectl get sc
 ```
-You should see "openebs-device" already created by OpenEBS.
-
-
----
-
-### Step 3: Create a StorageClass
-Create a StorageClass that tells Kubernetes to use the OpenEBS provisioner to format raw disks.
-
-```bash
-cat <<EOF | kubectl apply -f -
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: local-nvme
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "false"
-provisioner: local.csi.openebs.io
-parameters:
-  fsType: ext4
-volumeBindingMode: WaitForFirstConsumer
-reclaimPolicy: Delete
-EOF
-```
-
----
-
-### Step 4: Create a Persistent Volume Claim (PVC)
-Now, request storage from this new StorageClass. OpenEBS will automatically find the blank `nvme1n1` drive on Worker 2, format it to `ext4`, and bind it.
-OpenEBS will use the entire NVMe drive regardless of what you request. The size only matters for Kubernetes scheduling decisions.
-
-### Quick test workflow:
-
-**1. Create the PVC:**
-```bash
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nvme-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: local-nvme
-  resources:
-    requests:
-      storage: 10Mi
-EOF
-```
-
-**2. Check status:**
-```bash
-kubectl get pvc nvme-pvc
-```
-Wait for `STATUS: Bound` (should take 10-30 seconds).
-
-**3. Verify which drive it claimed:**
-```bash
-kubectl get pv
-kubectl describe pv $(kubectl get pvc nvme-pvc -o jsonpath='{.spec.volumeName}')
-```
-Look for the `Path` field - it will show `/dev/nvme1n1` (or whatever the blank drive was).
+**Expected Output:**
+*   **`openebs-hostpath`**: Creates folders on the node's root disk (Best for small apps like Grafana/Prometheus).
+*   **`openebs-device`**: Formats and claims entire raw blank disks (Best for databases/large data on your extra NVMe).
